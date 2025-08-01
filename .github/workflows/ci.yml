@@ -1,0 +1,141 @@
+name: MLOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-suite:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run tests
+      run: |
+        python -m pytest tests/ -v
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results
+        path: |
+          .pytest_cache/
+          htmlcov/
+
+  train-and-quantize:
+    name: Train and Quantize
+    runs-on: ubuntu-latest
+    needs: test-suite
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Train model
+      run: |
+        cd src
+        python train.py
+        
+    - name: Quantize model
+      run: |
+        cd src
+        python quantize.py
+        
+    - name: List created files
+      run: |
+        echo "Files in src directory:"
+        ls -la src/
+        echo "Files in root directory:"
+        ls -la ../
+        
+    - name: Upload model artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: model-artifacts
+        path: |
+          src/model.joblib
+          src/scaler.joblib
+          src/quant_params.joblib
+          src/unquant_params.joblib
+
+  build-and-test-container:
+    name: Build and Test Container
+    runs-on: ubuntu-latest
+    needs: train-and-quantize
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download model artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: model-artifacts
+        path: ./
+        
+    - name: List downloaded files
+      run: |
+        echo "Files in current directory:"
+        ls -la
+        echo "Files in src directory:"
+        ls -la src/ || echo "src directory not found"
+        
+    - name: Ensure model files are in root directory
+      run: |
+        # Check if files are in src directory and move them
+        if [ -f "src/model.joblib" ]; then
+          echo "Moving model files from src/ to root directory"
+          mv src/*.joblib ./
+        fi
+        
+        # Verify model files are in root directory
+        echo "Model files in root directory:"
+        ls -la *.joblib || echo "No .joblib files found in root directory"
+        
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build Docker image
+      run: |
+        docker build -t mlops-linear-regression .
+        
+    - name: Test Docker container
+      run: |
+        docker run --rm mlops-linear-regression
+        
+    - name: Verify container output
+      run: |
+        output=$(docker run --rm mlops-linear-regression 2>&1)
+        echo "$output"
+        if echo "$output" | grep -q "Model verification successful"; then
+          echo "Container test passed successfully"
+        else
+          echo "Container test failed"
+          exit 1
+        fi 
